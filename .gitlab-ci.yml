@@ -9,5 +9,5 @@ deploy-pages:
     - npm run build
   pages:
     publish: docs
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  only:
+    - main

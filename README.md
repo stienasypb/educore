@@ -8,6 +8,11 @@ layar, atau tekan tombol untuk kembali. TimeSpot tidak aktif selama sesi ujian
 berlangsung. Jamnya disinkronkan dengan waktu server Hosting dan akan memakai
 waktu perangkat jika server tidak tersedia.
 
+Data rekap peserta disinkronkan ke Supabase. Pengelola dapat menekan
+**Sinkronkan** pada Rekap Peserta untuk mengirim ulang data lokal yang gagal
+terkirim dan mengambil versi server terbaru. Data selesai yang memiliki waktu
+penyelesaian diperbaiki statusnya saat rekap dimuat.
+
 Alamat GitHub Pages lama mengarahkan pengunjung ke
 `https://educore-stienasbjm.web.app`.
 
@@ -41,3 +46,8 @@ GitHub Actions, buat service account dengan izin Firebase Hosting, lalu simpan
 JSON key-nya di GitHub repository secret bernama
 `FIREBASE_SERVICE_ACCOUNT_EDUCORE_STIENASBJM`. Setelah itu jalankan workflow
 `Deploy to Firebase Hosting` atau push ke branch `main`.
+
+Perubahan Edge Function peserta dideploy oleh workflow terpisah. Untuk
+mengaktifkannya, simpan personal access token Supabase sebagai repository
+secret `SUPABASE_ACCESS_TOKEN`, lalu jalankan `Deploy participant sync
+function` atau ubah file Edge Function pada push berikutnya.

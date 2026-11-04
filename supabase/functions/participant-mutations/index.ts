@@ -64,6 +64,13 @@ async function isAdmin(req: Request): Promise<boolean> {
 const isFilled = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 
+const sameInstant = (left: unknown, right: unknown): boolean => {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  return Number.isFinite(leftTime) && leftTime === rightTime;
+};
+
 type TokenReservationStatus = 'reserved' | 'invalid_token' | 'token_capacity_reached' | 'token_reservation_conflict' | 'token_lookup_failed';
 type TokenReservation = { status: TokenReservationStatus; code?: string };
 
@@ -213,11 +220,12 @@ serve(async (req) => {
           && existing.exam_type === record.examType
           && existing.exam_name === record.examName
           && existing.token_code === record.tokenCode
-          && existing.started_at === record.startedAt
+          && sameInstant(existing.started_at, record.startedAt)
           && existing.workstation_id === record.workstationId;
-        if (!immutableMatches || existing.status === 'completed') {
+        if (!immutableMatches || (existing.status === 'completed' && record.status !== 'completed')) {
           return json({ error: 'participant_identity_mismatch' }, 403);
         }
+        if (existing.status === 'completed') return json({ ok: true });
       }
 
       // Public participants may create their own in-progress row after token

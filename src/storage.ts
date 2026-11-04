@@ -10,6 +10,7 @@ import type {
 const STORAGE_KEYS = {
   TOKENS: 'toefl_tpa_tokens_v4',
   PARTICIPANTS: 'toefl_tpa_participants_v4',
+  PENDING_PARTICIPANT_SYNC: 'educore_pending_participant_sync_v1',
   SETTINGS: 'toefl_tpa_settings_v4',
   THEME: 'toefl_theme_mode',
   EXAM_SESSION: 'educore_exam_session_v1',
@@ -326,6 +327,27 @@ export const StorageService = {
     localStorage.setItem(STORAGE_KEYS.PARTICIPANTS, JSON.stringify(records));
   },
 
+  getPendingParticipantSyncIds(): string[] {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEYS.PENDING_PARTICIPANT_SYNC) ?? '[]');
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+    } catch {
+      return [];
+    }
+  },
+
+  markParticipantSyncPending(id: string): void {
+    const pendingIds = this.getPendingParticipantSyncIds();
+    if (!pendingIds.includes(id)) {
+      localStorage.setItem(STORAGE_KEYS.PENDING_PARTICIPANT_SYNC, JSON.stringify([...pendingIds, id]));
+    }
+  },
+
+  markParticipantSynced(id: string): void {
+    const pendingIds = this.getPendingParticipantSyncIds().filter((pendingId) => pendingId !== id);
+    localStorage.setItem(STORAGE_KEYS.PENDING_PARTICIPANT_SYNC, JSON.stringify(pendingIds));
+  },
+
   findParticipantByNim(nim: string, examType: ExamType): ParticipantRecord | undefined {
     const clean = nim.trim().toLowerCase();
     return this.getParticipants().find(
@@ -403,6 +425,7 @@ export const StorageService = {
 
   clearParticipants(): void {
     this.saveParticipants([]);
+    localStorage.removeItem(STORAGE_KEYS.PENDING_PARTICIPANT_SYNC);
   },
 
   deleteParticipant(id: string): ParticipantRecord | undefined {
@@ -410,6 +433,7 @@ export const StorageService = {
     const removed = participants.find((p) => p.id === id);
     if (!removed) return undefined;
     this.saveParticipants(participants.filter((p) => p.id !== id));
+    this.markParticipantSynced(id);
     // Usage token ikut turun supaya kolom "Pakai" tetap akurat setelah data dihapus.
     this.decrementTokenUsage(removed.tokenCode);
     return removed;

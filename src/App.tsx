@@ -287,6 +287,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filterExam, setFilterExam] = useState<string>('all');
   const [filterProdi, setFilterProdi] = useState<string>('all');
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<Set<string>>(() => new Set());
 
   // Modals & UI States
   const [isTokenModalOpen, setIsTokenModalOpen] = useState<boolean>(false);
@@ -423,10 +424,9 @@ export function App() {
         }
       });
 
-      SupabaseService.fetchParticipants().then((cloudParticipants) => {
-        if (cloudParticipants && cloudParticipants.length > 0) {
-          setParticipants(cloudParticipants);
-          StorageService.saveParticipants(cloudParticipants);
+      SupabaseService.syncParticipantsForAdmin().then((syncResult) => {
+        if (syncResult) {
+          setParticipants(syncResult.participants);
         }
       });
     });
@@ -759,7 +759,15 @@ export function App() {
     };
     StorageService.saveExamSession(newSession);
     setSavedExamSession(newSession);
-    void SupabaseService.upsertParticipant(newRecord);
+    const synced = await SupabaseService.upsertParticipant(newRecord);
+    if (!synced) {
+      await Swal.fire({
+        icon: 'warning',
+        title: 'Data tersimpan di perangkat',
+        text: 'Sinkronisasi peserta ke server gagal. Ujian tetap dapat dimulai; data akan dicoba sinkron kembali saat pengelola memuat rekap.',
+        confirmButtonText: 'Mulai ujian',
+      });
+    }
     setTimerRunning(true);
     setCurrentScreen('student_exam');
   };
@@ -803,12 +811,13 @@ export function App() {
   };
 
   // Finish Exam
-  const handleConfirmFinishExam = () => {
+  const handleConfirmFinishExam = async () => {
+    let synced = true;
     if (currentParticipant) {
       const updated = StorageService.completeParticipantExam(currentParticipant.id);
       if (updated) {
         setCurrentParticipant(updated);
-        void SupabaseService.upsertParticipant(updated);
+        synced = await SupabaseService.upsertParticipant(updated);
       }
       refreshParticipants();
     }
@@ -817,21 +826,59 @@ export function App() {
     setTimerRunning(false);
     setIsFinishConfirmModalOpen(false);
     setCurrentScreen('student_completed');
+    if (!synced) {
+      await Swal.fire({
+        icon: 'warning',
+        title: 'Penyelesaian disimpan di perangkat',
+        text: 'Status selesai belum tersinkron ke server. Pengelola dapat mencoba sinkronisasi ulang dari menu Rekap Peserta.',
+      });
+    }
   };
 
   // Memuat ulang data khusus pengelola (token + rekap peserta).
-  const refreshAdminData = () => {
-    SupabaseService.syncTokensForAdmin().then((cloudTokens) => {
-      if (cloudTokens) {
-        setTokens(cloudTokens);
-        StorageService.saveTokens(cloudTokens);
-      }
-    });
-    SupabaseService.fetchParticipants().then((cloudParticipants) => {
-      if (cloudParticipants && cloudParticipants.length > 0) {
-        setParticipants(cloudParticipants);
-        StorageService.saveParticipants(cloudParticipants);
-      }
+  const refreshAdminData = async () => {
+    const [cloudTokens, participantSync] = await Promise.all([
+      SupabaseService.syncTokensForAdmin(),
+      SupabaseService.syncParticipantsForAdmin(),
+    ]);
+    if (cloudTokens) {
+      setTokens(cloudTokens);
+      StorageService.saveTokens(cloudTokens);
+    }
+    if (participantSync) {
+      setParticipants(participantSync.participants);
+    }
+  };
+
+  const handleSyncParticipants = async () => {
+    const result = await SupabaseService.syncParticipantsForAdmin();
+    if (!result) {
+      await Swal.fire({
+        icon: 'error',
+        title: 'Sinkronisasi gagal',
+        text: 'Data rekap tidak dapat dibaca dari server. Periksa koneksi dan sesi pengelola, lalu coba lagi.',
+      });
+      return;
+    }
+
+    setParticipants(result.participants);
+    if (result.failedCount > 0) {
+      await Swal.fire({
+        icon: 'warning',
+        title: 'Sinkronisasi sebagian',
+        text: `${result.syncedCount} data tersinkron. ${result.failedCount} data masih menunggu koneksi server.`,
+      });
+      return;
+    }
+
+    await Swal.fire({
+      icon: 'success',
+      title: 'Rekap tersinkron',
+      text: result.syncedCount > 0
+        ? `${result.participants.length} peserta tersedia; ${result.syncedCount} perubahan lokal berhasil dikirim ke server.`
+        : `${result.participants.length} data peserta sudah sesuai dengan server.`,
+      timer: 1800,
+      showConfirmButton: false,
     });
   };
 
@@ -1029,7 +1076,31 @@ export function App() {
     }
   };
 
-  // Hapus satu peserta secara manual (data salah input / NIM asal-asalan).
+  const deleteParticipantRecords = async (records: ParticipantRecord[]) => {
+    const deletedIds: string[] = [];
+    const failedIds: string[] = [];
+
+    for (const record of records) {
+      if (await SupabaseService.deleteParticipant(record.id)) {
+        StorageService.deleteParticipant(record.id);
+        deletedIds.push(record.id);
+      } else {
+        failedIds.push(record.id);
+      }
+    }
+
+    setSelectedParticipantIds(new Set(failedIds));
+    refreshParticipants();
+
+    if (failedIds.length > 0) {
+      await Swal.fire({
+        icon: 'warning',
+        title: 'Sebagian data belum terhapus',
+        text: `${deletedIds.length} data berhasil dihapus dari server. ${failedIds.length} data tetap dipertahankan dan dapat dicoba lagi setelah koneksi pulih.`,
+      });
+    }
+  };
+
   const handleDeleteParticipant = async (id: string, name: string, nim: string) => {
     const result = await Swal.fire({
       icon: 'warning',
@@ -1042,18 +1113,8 @@ export function App() {
     });
 
     if (!result.isConfirmed) return;
-
-    StorageService.deleteParticipant(id);
-    const deletedFromCloud = await SupabaseService.deleteParticipant(id);
-    refreshParticipants();
-
-    if (!deletedFromCloud) {
-      await Swal.fire({
-        icon: 'warning',
-        title: 'Data terhapus lokal',
-        text: 'Data peserta dihapus pada perangkat ini, tetapi server tidak dapat dihubungi. Periksa koneksi Supabase lalu muat ulang halaman.',
-      });
-    }
+    const participant = participants.find((record) => record.id === id);
+    if (participant) await deleteParticipantRecords([participant]);
   };
 
   const handleOpenPreview = (url: string, title: string) => {
@@ -1073,6 +1134,35 @@ export function App() {
     const matchesProdi = filterProdi === 'all' || p.prodi === filterProdi;
     return matchesSearch && matchesExam && matchesProdi;
   });
+  const allFilteredParticipantsSelected =
+    filteredParticipants.length > 0 &&
+    filteredParticipants.every((participant) => selectedParticipantIds.has(participant.id));
+  const toggleFilteredParticipants = () => {
+    setSelectedParticipantIds((current) => {
+      const next = new Set(current);
+      if (allFilteredParticipantsSelected) {
+        filteredParticipants.forEach((participant) => next.delete(participant.id));
+      } else {
+        filteredParticipants.forEach((participant) => next.add(participant.id));
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteSelectedParticipants = async () => {
+    const selected = participants.filter((participant) => selectedParticipantIds.has(participant.id));
+    if (selected.length === 0) return;
+    const result = await Swal.fire({
+      icon: 'warning',
+      title: `Hapus ${selected.length} peserta terpilih?`,
+      text: 'Data yang dipilih akan dihapus dari server dan perangkat ini. Tindakan ini tidak dapat dibatalkan.',
+      showCancelButton: true,
+      confirmButtonText: `Hapus ${selected.length} peserta`,
+      cancelButtonText: 'Batal',
+      confirmButtonColor: '#dc2626',
+    });
+    if (result.isConfirmed) await deleteParticipantRecords(selected);
+  };
 
   // Calculate Active URL for Student
   const currentStudentUrl = () => {
@@ -2503,10 +2593,25 @@ export function App() {
                     <option value="tpa">TPA</option>
                   </select>
 
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => void handleSyncParticipants()}>
+                    <RefreshCw size={13} /> Sinkronkan
+                  </button>
+
+                  {selectedParticipantIds.size > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={() => void handleDeleteSelectedParticipants()}
+                    >
+                      <Trash2 size={13} /> Hapus dipilih ({selectedParticipantIds.size})
+                    </button>
+                  )}
+
                   {participants.length > 0 && (
                     <button
-                      onClick={() => {
-                        void Swal.fire({
+                      type="button"
+                      onClick={async () => {
+                        const result = await Swal.fire({
                           icon: 'warning',
                           title: 'Kosongkan data peserta?',
                           text: 'Seluruh data peserta akan dihapus dan tindakan ini tidak dapat dibatalkan.',
@@ -2514,14 +2619,23 @@ export function App() {
                           confirmButtonText: 'Ya, kosongkan',
                           cancelButtonText: 'Batal',
                           confirmButtonColor: '#dc2626',
-                        }).then(({ isConfirmed }) => {
-                          if (isConfirmed) {
-                            StorageService.clearParticipants();
-                            StorageService.clearExamSession();
-                            void SupabaseService.clearParticipants();
-                            setParticipants([]);
-                          }
                         });
+                        if (!result.isConfirmed) return;
+
+                        const cleared = await SupabaseService.clearParticipants();
+                        if (!cleared) {
+                          await Swal.fire({
+                            icon: 'error',
+                            title: 'Data belum dikosongkan',
+                            text: 'Server tidak berhasil menghapus rekap. Data lokal dipertahankan agar tidak muncul kembali setelah sinkronisasi.',
+                          });
+                          return;
+                        }
+
+                        StorageService.clearParticipants();
+                        StorageService.clearExamSession();
+                        setParticipants([]);
+                        setSelectedParticipantIds(new Set());
                       }}
                       className="btn btn-ghost btn-sm"
                       style={{ color: '#ef4444' }}
@@ -2535,7 +2649,14 @@ export function App() {
                   <table className="custom-table">
                     <thead>
                       <tr>
-                        <th>No</th>
+                        <th>
+                          <input
+                            type="checkbox"
+                            aria-label="Pilih semua peserta yang ditampilkan"
+                            checked={allFilteredParticipantsSelected}
+                            onChange={toggleFilteredParticipants}
+                          />
+                        </th>
                         <th>Nama</th>
                         <th>NIM</th>
                         <th>Prodi</th>
@@ -2557,7 +2678,24 @@ export function App() {
                       ) : (
                         filteredParticipants.map((p, idx) => (
                           <tr key={p.id}>
-                            <td>{idx + 1}</td>
+                            <td>
+                              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Pilih ${p.name} (NIM ${p.nim})`}
+                                  checked={selectedParticipantIds.has(p.id)}
+                                  onChange={() => {
+                                    setSelectedParticipantIds((current) => {
+                                      const next = new Set(current);
+                                      if (next.has(p.id)) next.delete(p.id);
+                                      else next.add(p.id);
+                                      return next;
+                                    });
+                                  }}
+                                />
+                                {idx + 1}
+                              </label>
+                            </td>
                             <td><strong>{p.name}</strong></td>
                             <td>{p.nim}</td>
                             <td>{p.prodi}</td>

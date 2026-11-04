@@ -198,9 +198,12 @@ export const SupabaseService = {
         .select('*')
         .order('started_at', { ascending: false });
 
-      if (error || !data) return null;
+      if (error || !data) {
+        console.warn('Supabase fetchParticipants failed:', error);
+        return null;
+      }
 
-      return data
+      const participants = data
         .filter((row) => typeof row.id === 'string' && typeof row.nim === 'string' && row.nim.trim() !== '')
         .map((row) => ({
           id: row.id,
@@ -212,14 +215,91 @@ export const SupabaseService = {
           tokenCode: row.token_code,
           startedAt: row.started_at,
           completedAt: row.completed_at || undefined,
-          status: row.status,
+          status: row.status === 'completed' || Boolean(row.completed_at) ? 'completed' as const : 'in_progress' as const,
           currentSection: row.current_section || undefined,
           workstationId: row.workstation_id || 'LAB-CBT',
         }));
+
+      const completionRepairs = data
+        .filter((row) => row.status !== 'completed' && Boolean(row.completed_at))
+        .map((row) => {
+          const participant = participants.find((item) => item.id === row.id);
+          return participant ? SupabaseService.upsertParticipant(participant) : Promise.resolve(false);
+        });
+      const repairResults = await Promise.all(completionRepairs);
+      if (repairResults.some((synced) => !synced)) {
+        console.warn('Some participant completion statuses could not be repaired in Supabase.');
+      }
+
+      return participants;
     } catch (err) {
       console.warn('Supabase fetchParticipants fallback to local:', err);
       return null;
     }
+  },
+
+  async syncParticipantsForAdmin(): Promise<{
+    participants: ParticipantRecord[];
+    syncedCount: number;
+    failedCount: number;
+  } | null> {
+    const cloudParticipants = await SupabaseService.fetchParticipants();
+    if (!cloudParticipants) return null;
+
+    const localParticipants = StorageService.getParticipants();
+    const localById = new Map(localParticipants.map((participant) => [participant.id, participant]));
+    const cloudById = new Map(cloudParticipants.map((participant) => [participant.id, participant]));
+    const pendingIds = new Set(StorageService.getPendingParticipantSyncIds());
+    for (const localParticipant of localParticipants) {
+      const cloudParticipant = cloudById.get(localParticipant.id);
+      if (localParticipant.status === 'completed' && cloudParticipant?.status === 'in_progress') {
+        pendingIds.add(localParticipant.id);
+      }
+    }
+    let syncedCount = 0;
+    let failedCount = 0;
+
+    for (const id of pendingIds) {
+      const localParticipant = localById.get(id);
+      if (!localParticipant) {
+        const cloudParticipant = cloudById.get(id);
+        if (cloudParticipant?.status === 'completed' && cloudParticipant.completedAt) {
+          if (await SupabaseService.upsertParticipant(cloudParticipant)) {
+            syncedCount += 1;
+          } else {
+            failedCount += 1;
+          }
+        } else {
+          StorageService.markParticipantSynced(id);
+        }
+        continue;
+      }
+
+      const cloudParticipant = cloudById.get(id);
+      if (cloudParticipant?.status === 'completed' && localParticipant.status !== 'completed') {
+        StorageService.markParticipantSynced(id);
+        continue;
+      }
+
+      if (await SupabaseService.upsertParticipant(localParticipant)) {
+        syncedCount += 1;
+      } else {
+        failedCount += 1;
+      }
+    }
+
+    const refreshedCloudParticipants = await SupabaseService.fetchParticipants();
+    if (!refreshedCloudParticipants) return null;
+
+    const refreshedById = new Map(refreshedCloudParticipants.map((participant) => [participant.id, participant]));
+    const merged = [...refreshedCloudParticipants];
+    for (const id of StorageService.getPendingParticipantSyncIds()) {
+      const localParticipant = localById.get(id);
+      if (localParticipant && !refreshedById.has(id)) merged.push(localParticipant);
+    }
+
+    StorageService.saveParticipants(merged);
+    return { participants: merged, syncedCount, failedCount };
   },
 
   /**
@@ -248,37 +328,45 @@ export const SupabaseService = {
   },
 
   async upsertParticipant(record: ParticipantRecord): Promise<boolean> {
-    const viaFunction = await SupabaseService.invokeParticipantMutation({
-      action: 'upsert',
-      record,
-    });
-    if (viaFunction !== null) return viaFunction;
+    StorageService.markParticipantSyncPending(record.id);
 
     try {
-      const { error } = await supabase.from('participants').upsert(
-        [
-          {
-            id: record.id,
-            name: record.name,
-            nim: record.nim,
-            prodi: record.prodi,
-            exam_type: record.examType,
-            exam_name: record.examName,
-            token_code: record.tokenCode,
-            started_at: record.startedAt,
-            completed_at: record.completedAt || null,
-            status: record.status,
-            current_section: record.currentSection || null,
-            workstation_id: record.workstationId,
-          },
-        ],
-        { onConflict: 'id' },
-      );
-      if (error) {
-        console.warn('Supabase upsertParticipant failed; participant remains saved locally:', error);
-        return false;
+      const viaFunction = await SupabaseService.invokeParticipantMutation({
+        action: 'upsert',
+        record,
+      });
+      let synced = viaFunction ?? false;
+
+      if (viaFunction === null) {
+        const { error } = await supabase.from('participants').upsert(
+          [
+            {
+              id: record.id,
+              name: record.name,
+              nim: record.nim,
+              prodi: record.prodi,
+              exam_type: record.examType,
+              exam_name: record.examName,
+              token_code: record.tokenCode,
+              started_at: record.startedAt,
+              completed_at: record.completedAt || null,
+              status: record.status,
+              current_section: record.currentSection || null,
+              workstation_id: record.workstationId,
+            },
+          ],
+          { onConflict: 'id' },
+        );
+        if (error) {
+          console.warn('Supabase upsertParticipant failed; participant remains saved locally:', error);
+          synced = false;
+        } else {
+          synced = true;
+        }
       }
-      return true;
+
+      if (synced) StorageService.markParticipantSynced(record.id);
+      return synced;
     } catch (err) {
       console.warn('Supabase upsertParticipant failed; participant remains saved locally:', err);
       return false;

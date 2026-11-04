@@ -15,6 +15,8 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EDUCORE_STIENASBJM }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,9 +36,14 @@ jobs:
           FIREBASE_HOSTING: "true"
 
       - name: Deploy to Firebase Hosting
+        if: env.FIREBASE_SERVICE_ACCOUNT != ''
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EDUCORE_STIENASBJM }}
+          firebaseServiceAccount: ${{ env.FIREBASE_SERVICE_ACCOUNT }}
           projectId: educore-stienasbjm
           channelId: live
+
+      - name: Report missing Firebase deployment credential
+        if: env.FIREBASE_SERVICE_ACCOUNT == ''
+        run: echo "::warning::Set the FIREBASE_SERVICE_ACCOUNT_EDUCORE_STIENASBJM repository secret to enable deployment."

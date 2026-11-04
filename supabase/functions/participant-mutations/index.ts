@@ -64,6 +64,7 @@ async function isAdmin(req: Request): Promise<boolean> {
 const isFilled = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 
+// PostgreSQL may serialize the same timestamptz with a different UTC offset or precision.
 const sameInstant = (left: unknown, right: unknown): boolean => {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
   const leftTime = Date.parse(left);

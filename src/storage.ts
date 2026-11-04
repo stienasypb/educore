@@ -231,7 +231,7 @@ export function formatAudioUrl(rawUrl: string | undefined): string {
 export const StorageService = {
   getTheme(): 'dark' | 'light' {
     const stored = localStorage.getItem(STORAGE_KEYS.THEME);
-    return stored === 'light' ? 'light' : 'dark';
+    return stored === 'dark' ? 'dark' : 'light';
   },
 
   setTheme(theme: 'dark' | 'light'): void {

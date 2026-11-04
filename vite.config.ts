@@ -5,11 +5,14 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "");
   const pagesUrl = env.CI_PAGES_URL;
   const repositoryName = env.GITHUB_REPOSITORY?.split("/")[1];
-  const base = pagesUrl
-    ? pagesUrl.replace(/^https?:\/\/[^/]+/, "").replace(/\/?$/, "/")
-    : repositoryName
-      ? `/${repositoryName}/`
-      : "/";
+  const base =
+    env.FIREBASE_HOSTING === "true"
+      ? "/"
+      : pagesUrl
+        ? pagesUrl.replace(/^https?:\/\/[^/]+/, "").replace(/\/?$/, "/")
+        : repositoryName
+          ? `/${repositoryName}/`
+          : "/";
 
   return {
     base,

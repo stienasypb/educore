@@ -36,7 +36,10 @@ import {
   LockKeyhole,
   ArrowUpRight,
   LoaderCircle,
-  ClipboardCheck
+  ClipboardCheck,
+  Clock3,
+  Move,
+  Globe2
 } from 'lucide-react';
 import { StorageService, formatAudioUrl, formatEmbedUrl } from './storage';
 import { downloadExamReportExcel, printExamReport } from './reports';
@@ -51,6 +54,175 @@ import type {
   ToeflSectionKey,
   ProdiType,
 } from './types';
+
+const TIME_SPOTS = [
+  { city: 'Banjarmasin', country: 'Indonesia', zone: 'Asia/Makassar', label: 'WITA' },
+  { city: 'Jakarta', country: 'Indonesia', zone: 'Asia/Jakarta', label: 'WIB' },
+  { city: 'Tokyo', country: 'Jepang', zone: 'Asia/Tokyo', label: 'JST' },
+  { city: 'London', country: 'Inggris', zone: 'Europe/London', label: 'UK' },
+] as const;
+
+function TimeSpotScreensaver({ onWake }: { onWake: () => void }) {
+  const [now, setNow] = useState(() => new Date());
+  const [syncStatus, setSyncStatus] = useState<'syncing' | 'synced' | 'unavailable'>('syncing');
+  const serverClockRef = useRef<{ timestamp: number; performanceTime: number } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const abortController = new AbortController();
+
+    const syncClock = async () => {
+      const requestStartedAt = performance.now();
+
+      try {
+        const syncUrl = new URL(import.meta.env.BASE_URL, window.location.origin);
+        syncUrl.searchParams.set('_timespot_sync', String(Math.floor(requestStartedAt)));
+        const response = await fetch(syncUrl, {
+          method: 'HEAD',
+          cache: 'no-store',
+          signal: abortController.signal,
+        });
+        const responseReceivedAt = performance.now();
+        const serverDate = Date.parse(response.headers.get('Date') ?? '');
+
+        if (!response.ok || !Number.isFinite(serverDate)) {
+          throw new Error(`Respons waktu server tidak valid (HTTP ${response.status}).`);
+        }
+
+        const synchronizedClock = {
+          timestamp: serverDate + (responseReceivedAt - requestStartedAt) / 2,
+          performanceTime: responseReceivedAt,
+        };
+        serverClockRef.current = synchronizedClock;
+
+        if (active) {
+          setNow(new Date(synchronizedClock.timestamp));
+          setSyncStatus('synced');
+        }
+      } catch (error) {
+        if (!active) return;
+        console.error('TimeSpot gagal menyinkronkan waktu dengan server.', error);
+        setSyncStatus(serverClockRef.current ? 'synced' : 'unavailable');
+      }
+    };
+
+    const updateClock = () => {
+      const synchronizedClock = serverClockRef.current;
+      const timestamp = synchronizedClock
+        ? synchronizedClock.timestamp + (performance.now() - synchronizedClock.performanceTime)
+        : Date.now();
+      setNow(new Date(timestamp));
+    };
+    const syncWhenVisible = () => {
+      if (document.visibilityState === 'visible') void syncClock();
+    };
+
+    void syncClock();
+    const intervalId = window.setInterval(updateClock, 1000);
+    const syncIntervalId = window.setInterval(() => void syncClock(), 60_000);
+    document.addEventListener('visibilitychange', syncWhenVisible);
+
+    return () => {
+      active = false;
+      abortController.abort();
+      window.clearInterval(intervalId);
+      window.clearInterval(syncIntervalId);
+      document.removeEventListener('visibilitychange', syncWhenVisible);
+    };
+  }, []);
+
+  const formatTime = (timeZone: string, withSeconds = false) =>
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      ...(withSeconds ? { second: '2-digit' } : {}),
+      hourCycle: 'h23',
+    }).format(now);
+
+  return (
+    <div className="timespot-overlay" role="dialog" aria-modal="true" aria-label="TimeSpot EduCore" onClick={onWake}>
+      <header className="timespot-header">
+        <a className="timespot-brand" href={import.meta.env.BASE_URL} onClick={(event) => event.preventDefault()}>
+          <span className="timespot-brand-icon"><Clock3 size={22} /></span>
+          <span><strong>EduCore</strong><small>TimeSpot · STIE Nasional Banjarmasin</small></span>
+        </a>
+        <button type="button" className="timespot-resume" onClick={onWake}>
+          Lanjutkan <ArrowRight size={17} />
+        </button>
+      </header>
+
+      <main className="timespot-main">
+        <div className="timespot-time" aria-live="off">{formatTime('Asia/Makassar', true)}</div>
+        <div className="timespot-current-meta">
+          <span><Globe2 size={15} /> WITA · Banjarmasin, Indonesia</span>
+          <span><Sun size={16} /> Zona waktu aktif</span>
+        </div>
+        <div className="timespot-date">
+          {new Intl.DateTimeFormat('id-ID', {
+            timeZone: 'Asia/Makassar',
+            weekday: 'long',
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric',
+          }).format(now)}
+        </div>
+      </main>
+
+      <section className="timespot-world">
+        <div className="timespot-world-heading">
+          <div><span>WAKTU DUNIA</span><h2>Jam saat ini</h2></div>
+          <small>
+            {syncStatus === 'synced'
+              ? 'Tersinkron dengan waktu server'
+              : syncStatus === 'syncing'
+                ? 'Menyinkronkan waktu...'
+                : 'Server tidak tersedia · memakai waktu perangkat'}
+          </small>
+        </div>
+        <div className="timespot-city-grid">
+          {TIME_SPOTS.map((spot) => (
+            <article
+              key={spot.city}
+              className={`timespot-city-card ${spot.city === 'Banjarmasin' ? 'current' : ''}`}
+            >
+              <div><strong>{spot.city}</strong><span>{spot.label}</span></div>
+              <time>{formatTime(spot.zone)}</time>
+              <small>{spot.country}</small>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <footer className="timespot-hint">
+        <Move size={15} /> Gerakkan kursor, sentuh layar, atau tekan tombol apa saja untuk melanjutkan
+      </footer>
+    </div>
+  );
+}
+
+function ThemeToggle({
+  theme,
+  onToggle,
+}: {
+  theme: 'dark' | 'light';
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`theme-toggle-switch ${theme === 'dark' ? 'is-dark' : ''}`}
+      title={theme === 'dark' ? 'Ganti ke mode terang' : 'Ganti ke mode gelap'}
+      aria-label={theme === 'dark' ? 'Ganti ke mode terang' : 'Ganti ke mode gelap'}
+      aria-pressed={theme === 'dark'}
+    >
+      <span className="theme-toggle-thumb">
+        {theme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
+      </span>
+    </button>
+  );
+}
 
 export function App() {
   // Theme state: 'dark' | 'light'
@@ -138,6 +310,7 @@ export function App() {
   const [listeningAudioFile, setListeningAudioFile] = useState<File | null>(null);
   const [isUploadingListeningAudio, setIsUploadingListeningAudio] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isTimeSpotOpen, setIsTimeSpotOpen] = useState<boolean>(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -146,6 +319,49 @@ export function App() {
     document.documentElement.setAttribute('data-theme', theme);
     StorageService.setTheme(theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (
+      currentScreen === 'student_exam' ||
+      isTokenModalOpen ||
+      isPreviewModalOpen ||
+      isFinishConfirmModalOpen ||
+      isUploadingListeningAudio
+    ) {
+      setIsTimeSpotOpen(false);
+      return;
+    }
+
+    let timeoutId = 0;
+    const resetIdleTimer = () => {
+      window.clearTimeout(timeoutId);
+      setIsTimeSpotOpen(false);
+      timeoutId = window.setTimeout(() => setIsTimeSpotOpen(true), 60_000);
+    };
+    const activityEvents: Array<keyof WindowEventMap> = [
+      'pointermove',
+      'pointerdown',
+      'keydown',
+      'touchstart',
+      'wheel',
+      'scroll',
+    ];
+
+    resetIdleTimer();
+    activityEvents.forEach((eventName) =>
+      window.addEventListener(eventName, resetIdleTimer, { capture: true, passive: true }),
+    );
+    return () => {
+      window.clearTimeout(timeoutId);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, resetIdleTimer, true));
+    };
+  }, [
+    currentScreen,
+    isFinishConfirmModalOpen,
+    isPreviewModalOpen,
+    isTokenModalOpen,
+    isUploadingListeningAudio,
+  ]);
 
   // Pengaman: layar peserta tidak boleh tampil tanpa data pendukung (layar kosong).
   useEffect(() => {
@@ -894,10 +1110,7 @@ export function App() {
                   <small>STIE Nasional Banjarmasin</small>
                 </span>
               </a>
-              <button type="button" onClick={toggleTheme} className="theme-toggle-btn" title="Ganti Tema">
-                {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
-                <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
-              </button>
+              <ThemeToggle theme={theme} onToggle={toggleTheme} />
             </header>
 
             <div className="login-showcase">
@@ -905,10 +1118,10 @@ export function App() {
                 <div className="login-hero-orbit login-hero-orbit-one" />
                 <div className="login-hero-orbit login-hero-orbit-two" />
                 <div className="login-hero-content">
-                  <div className="login-eyebrow"><Sparkles size={14} /> PORTAL AKADEMIK DIGITAL</div>
-                  <h1>Fokus pada potensi.<br /><span>Raih pencapaian.</span></h1>
+                  <div className="login-eyebrow"><Sparkles size={14} /> STIE NASIONAL BANJARMASIN</div>
+                  <h1>Ruang ujian<br /><span>TOEFL Like &amp; TPA.</span></h1>
                   <p>
-                    Satu ruang digital untuk mengerjakan ujian dengan lebih terarah, nyaman, dan terukur.
+                    Masuk menggunakan kode sesi dari pengawas untuk memulai ujian.
                   </p>
                   <div className="login-exam-highlights">
                     <div className="login-exam-highlight">
@@ -1032,7 +1245,6 @@ export function App() {
                     <button type="submit" className="btn btn-primary btn-lg login-submit">
                       Masuk dengan aman <ArrowRight size={17} />
                     </button>
-                    <p className="login-helper"><LockKeyhole size={14} /> Sesi aman dikelola oleh Supabase Auth.</p>
                   </form>
                 )}
 
@@ -1171,10 +1383,7 @@ export function App() {
       {currentScreen === 'student_profile' && activeToken && (
         <main style={{ maxWidth: '580px', margin: '3.5rem auto', padding: '0 1.25rem', width: '100%' }}>
           <div style={{ position: 'fixed', top: '1.25rem', right: '1.5rem', zIndex: 100 }}>
-            <button type="button" onClick={toggleTheme} className="theme-toggle-btn">
-              {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
-              <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
-            </button>
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
           </div>
 
           <div className="clean-card student-profile-card">
@@ -1288,9 +1497,7 @@ export function App() {
             <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '0.85rem', marginBottom: '0.85rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
                 <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Peserta</span>
-                <button type="button" onClick={toggleTheme} className="theme-toggle-btn" style={{ padding: '0.2rem 0.4rem', fontSize: '0.7rem' }}>
-                  {theme === 'dark' ? <Sun size={12} /> : <Moon size={12} />}
-                </button>
+                <ThemeToggle theme={theme} onToggle={toggleTheme} />
               </div>
               <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{studentName}</div>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
@@ -1572,10 +1779,7 @@ export function App() {
       {currentScreen === 'student_completed' && (
         <main style={{ maxWidth: '540px', margin: '3.5rem auto', padding: '0 1.25rem', width: '100%' }}>
           <div style={{ position: 'fixed', top: '1.25rem', right: '1.5rem', zIndex: 100 }}>
-            <button type="button" onClick={toggleTheme} className="theme-toggle-btn">
-              {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
-              <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
-            </button>
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
           </div>
 
           <div className="clean-card student-completion-card" style={{ textAlign: 'center', padding: '2.5rem 1.75rem' }}>
@@ -1682,11 +1886,14 @@ export function App() {
                 <button
                   type="button"
                   onClick={toggleTheme}
-                  className="theme-toggle-btn"
-                  style={{ padding: '0.3rem', color: '#ffffff' }}
+                  className={`theme-toggle-switch ${theme === 'dark' ? 'is-dark' : ''}`}
+                  title={theme === 'dark' ? 'Ganti ke mode terang' : 'Ganti ke mode gelap'}
                   aria-label="Ganti tema"
+                  aria-pressed={theme === 'dark'}
                 >
-                  {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
+                  <span className="theme-toggle-thumb">
+                    {theme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -1986,7 +2193,7 @@ export function App() {
               <div style={{ maxWidth: '780px' }}>
                 <div className="clean-card">
                   <h2 style={{ fontSize: '1.35rem', marginBottom: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-                    <span style={{ width: 4, height: 22, borderRadius: 3, background: 'var(--brand-gradient)', display: 'inline-block' }} />
+                    <span style={{ width: 4, height: 22, borderRadius: 3, background: '#d3a82f', display: 'inline-block' }} />
                     Pengaturan 3 Link Form TOEFL Like
                   </h2>
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.825rem', marginBottom: '1.5rem' }}>
@@ -2177,7 +2384,7 @@ export function App() {
               <div style={{ maxWidth: '640px' }}>
                 <div className="clean-card">
                   <h2 style={{ fontSize: '1.35rem', marginBottom: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-                    <span style={{ width: 4, height: 22, borderRadius: 3, background: 'var(--violet-gradient)', display: 'inline-block' }} />
+                    <span style={{ width: 4, height: 22, borderRadius: 3, background: '#ad302f', display: 'inline-block' }} />
                     Pengaturan Link Form TPA
                   </h2>
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.825rem', marginBottom: '1.5rem' }}>
@@ -2528,6 +2735,7 @@ export function App() {
           </div>
         </div>
       )}
+      {isTimeSpotOpen && <TimeSpotScreensaver onWake={() => setIsTimeSpotOpen(false)} />}
     </div>
   );
 }
